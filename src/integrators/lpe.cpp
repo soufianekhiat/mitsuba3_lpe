@@ -6,6 +6,7 @@
  *   D = Diffuse  (BSDFFlags::Diffuse)
  *   G = Glossy   (BSDFFlags::Glossy)
  *   S = Specular  (BSDFFlags::Delta)
+ *   T = Transmission (BSDFFlags::*Transmission, excluding Null)
  *
  * Standard LPE notation:
  *   L  = Light source
@@ -21,6 +22,7 @@
  *   indirect_diff L.+DE         Indirect diffuse
  *   indirect_spec L.+SE         Indirect specular
  *   emissive      LE            Directly visible emitters
+ *   transmission  L.*T.*E       Light through transmissive surfaces
  */
 
 #include <mitsuba/core/ray.h>
@@ -40,9 +42,9 @@ public:
 
     LPEIntegrator(const Properties &props) : Base(props) { }
 
-    /// LPE AOV channels: 5 passes x RGB = 15 floats
-    /// direct_diff, direct_spec, indirect_diff, indirect_spec, emissive
-    static constexpr size_t NUM_LPE_PASSES = 5;
+    /// LPE AOV channels: 6 passes x RGB = 18 floats
+    /// direct_diff, direct_spec, indirect_diff, indirect_spec, emissive, transmission
+    static constexpr size_t NUM_LPE_PASSES = 6;
     static constexpr size_t LPE_AOV_COUNT  = NUM_LPE_PASSES * 3;
 
     enum LPEPass {
@@ -50,7 +52,8 @@ public:
         DirectSpecular  = 1,
         IndirectDiffuse = 2,
         IndirectSpecular= 3,
-        Emissive        = 4
+        Emissive        = 4,
+        Transmission    = 5
     };
 
     std::vector<std::string> aov_names() const override {
@@ -59,7 +62,8 @@ public:
             "direct_spec.R",  "direct_spec.G",  "direct_spec.B",
             "indirect_diff.R","indirect_diff.G", "indirect_diff.B",
             "indirect_spec.R","indirect_spec.G", "indirect_spec.B",
-            "emissive.R",     "emissive.G",      "emissive.B"
+            "emissive.R",     "emissive.G",      "emissive.B",
+            "transmission.R", "transmission.G",  "transmission.B"
         };
     }
 
@@ -86,9 +90,10 @@ public:
         Mask valid_ray = !m_hide_emitters && (scene->environment() != nullptr);
 
         // Variables caching information from the previous bounce
-        Interaction3f prev_si         = dr::zeros<Interaction3f>();
-        Float         prev_bsdf_pdf   = 1.f;
-        Bool          prev_bsdf_delta = true;
+        Interaction3f prev_si               = dr::zeros<Interaction3f>();
+        Float         prev_bsdf_pdf         = 1.f;
+        Bool          prev_bsdf_delta       = true;
+        Bool          prev_bsdf_transmission = false;
         BSDFContext   bsdf_ctx;
 
         // LPE accumulation channels
@@ -97,6 +102,7 @@ public:
         Spectrum lpe_indirect_diff = 0.f;
         Spectrum lpe_indirect_spec = 0.f;
         Spectrum lpe_emissive      = 0.f;
+        Spectrum lpe_transmission  = 0.f;
 
         struct LoopState {
             Ray3f ray;
@@ -109,6 +115,7 @@ public:
             Interaction3f prev_si;
             Float prev_bsdf_pdf;
             Bool prev_bsdf_delta;
+            Bool prev_bsdf_transmission;
             Bool active;
             Sampler* sampler;
             // LPE channels
@@ -117,18 +124,21 @@ public:
             Spectrum lpe_indirect_diff;
             Spectrum lpe_indirect_spec;
             Spectrum lpe_emissive;
+            Spectrum lpe_transmission;
 
             DRJIT_STRUCT(LoopState, ray, pi, throughput, result, eta, depth, \
                 valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta,
-                active, sampler,
+                prev_bsdf_transmission, active, sampler,
                 lpe_direct_diff, lpe_direct_spec,
-                lpe_indirect_diff, lpe_indirect_spec, lpe_emissive)
+                lpe_indirect_diff, lpe_indirect_spec, lpe_emissive,
+                lpe_transmission)
         } ls = {
             ray, pi, throughput, result, eta, depth,
             valid_ray, prev_si, prev_bsdf_pdf, prev_bsdf_delta,
-            active, sampler,
+            prev_bsdf_transmission, active, sampler,
             lpe_direct_diff, lpe_direct_spec,
-            lpe_indirect_diff, lpe_indirect_spec, lpe_emissive
+            lpe_indirect_diff, lpe_indirect_spec, lpe_emissive,
+            lpe_transmission
         };
 
         // First bounce - coherent
@@ -179,22 +189,28 @@ public:
 
                 // LPE classification of BSDF-sampled emitter hits:
                 // depth==0 means directly visible emitter (LE)
-                // depth==1 means one bounce then emitter (L[D|S]E)
-                // depth>=2 means indirect (L.+[D|S]E)
+                // depth>=1 with transmission last bounce -> transmission
+                // depth==1 with reflection last bounce -> direct diff/spec
+                // depth>=2 with reflection last bounce -> indirect diff/spec
                 Mask is_emissive_vis = (ls.depth == 0u);
                 ls.lpe_emissive[is_emissive_vis] += weighted;
 
-                // For depth >= 1, the bounce type is prev_bsdf_delta
-                Mask depth_1   = (ls.depth == 1u);
-                Mask depth_ge2 = (ls.depth >= 2u);
+                Mask depth_ge1 = (ls.depth >= 1u);
 
-                // Direct: single bounce
-                ls.lpe_direct_diff[depth_1 && !ls.prev_bsdf_delta]  += weighted;
-                ls.lpe_direct_spec[depth_1 && ls.prev_bsdf_delta]   += weighted;
+                // Transmission: last bounce was a transmissive event
+                ls.lpe_transmission[depth_ge1 && ls.prev_bsdf_transmission] += weighted;
 
-                // Indirect: 2+ bounces
-                ls.lpe_indirect_diff[depth_ge2 && !ls.prev_bsdf_delta] += weighted;
-                ls.lpe_indirect_spec[depth_ge2 && ls.prev_bsdf_delta]  += weighted;
+                // Reflection passes (non-transmission)
+                Mask depth_1_refl   = (ls.depth == 1u)  && !ls.prev_bsdf_transmission;
+                Mask depth_ge2_refl = (ls.depth >= 2u) && !ls.prev_bsdf_transmission;
+
+                // Direct: single reflection bounce
+                ls.lpe_direct_diff[depth_1_refl && !ls.prev_bsdf_delta]  += weighted;
+                ls.lpe_direct_spec[depth_1_refl && ls.prev_bsdf_delta]   += weighted;
+
+                // Indirect: 2+ bounces, last was reflection
+                ls.lpe_indirect_diff[depth_ge2_refl && !ls.prev_bsdf_delta] += weighted;
+                ls.lpe_indirect_spec[depth_ge2_refl && ls.prev_bsdf_delta]  += weighted;
             }
 
             // Continue tracing?
@@ -252,31 +268,38 @@ public:
                     ls.throughput, nee_contrib, ls.result);
 
                 // LPE for emitter sampling (NEE):
-                // This is a connection from the current vertex to a light.
-                // The current vertex is at depth `ls.depth` bounces from camera.
-                // depth==0: first surface, NEE = L D E (direct)
-                // depth>=1: indirect path, NEE = L .+ [D|S] E
-                //
-                // NEE always evaluates the BSDF at the current vertex,
-                // so the bounce type here is the BSDF type at the surface
-                // (not bsdf_sample which is for the next BSDF-sampled direction).
-                // Since NEE requires Smooth BSDF (active_em checks this),
-                // and `wo` is toward the light, we need to check what component
-                // the BSDF evaluation used. For simplicity, since NEE is only
-                // done for Smooth BSDFs, the last bounce is always non-delta.
-                // We classify based on whether the BSDF has diffuse components.
-                Bool nee_has_diffuse = has_flag(bsdf->flags(), BSDFFlags::Diffuse);
+                // The NEE direction wo is in local frame. If wo.z() < 0,
+                // the light is on the back side -> transmission evaluation,
+                // but ONLY if the BSDF actually supports transmission.
+                // (twosided BSDFs respond to wo.z < 0 via normal flipping,
+                //  not real transmission -- exclude those)
+                Bool bsdf_has_real_transmission =
+                    has_flag(bsdf->flags(), BSDFFlags::DiffuseTransmission) ||
+                    has_flag(bsdf->flags(), BSDFFlags::GlossyTransmission) ||
+                    has_flag(bsdf->flags(), BSDFFlags::DeltaTransmission) ||
+                    has_flag(bsdf->flags(), BSDFFlags::Delta1DTransmission);
+                Bool nee_is_transmission =
+                    bsdf_has_real_transmission && (Frame3f::cos_theta(wo) < 0.f);
 
-                Mask depth_0 = active_em && (ls.depth == 0u);
-                Mask depth_ge1 = active_em && (ls.depth >= 1u);
+                // Transmission: NEE through transmissive surface
+                Mask nee_trans = active_em && nee_is_transmission;
+                ls.lpe_transmission[nee_trans] += weighted_nee;
+
+                // Reflection: classify as diffuse/specular
+                Mask nee_refl = active_em && !nee_is_transmission;
+                Bool nee_has_diffuse = has_flag(bsdf->flags(), BSDFFlags::DiffuseReflection) ||
+                                       has_flag(bsdf->flags(), BSDFFlags::GlossyReflection);
+
+                Mask nee_depth_0   = nee_refl && (ls.depth == 0u);
+                Mask nee_depth_ge1 = nee_refl && (ls.depth >= 1u);
 
                 // Direct (first surface, depth==0)
-                ls.lpe_direct_diff[depth_0 && nee_has_diffuse]   += weighted_nee;
-                ls.lpe_direct_spec[depth_0 && !nee_has_diffuse]  += weighted_nee;
+                ls.lpe_direct_diff[nee_depth_0 && nee_has_diffuse]   += weighted_nee;
+                ls.lpe_direct_spec[nee_depth_0 && !nee_has_diffuse]  += weighted_nee;
 
                 // Indirect (depth >= 1)
-                ls.lpe_indirect_diff[depth_ge1 && nee_has_diffuse]  += weighted_nee;
-                ls.lpe_indirect_spec[depth_ge1 && !nee_has_diffuse] += weighted_nee;
+                ls.lpe_indirect_diff[nee_depth_ge1 && nee_has_diffuse]  += weighted_nee;
+                ls.lpe_indirect_spec[nee_depth_ge1 && !nee_has_diffuse] += weighted_nee;
             }
 
             // ---------------------- BSDF sampling ----------------------
@@ -302,6 +325,11 @@ public:
             ls.prev_si = Interaction3f(si);
             ls.prev_bsdf_pdf = bsdf_sample.pdf;
             ls.prev_bsdf_delta = has_flag(bsdf_sample.sampled_type, BSDFFlags::Delta);
+            ls.prev_bsdf_transmission =
+                has_flag(bsdf_sample.sampled_type, BSDFFlags::DiffuseTransmission) ||
+                has_flag(bsdf_sample.sampled_type, BSDFFlags::GlossyTransmission) ||
+                has_flag(bsdf_sample.sampled_type, BSDFFlags::DeltaTransmission) ||
+                has_flag(bsdf_sample.sampled_type, BSDFFlags::Delta1DTransmission);
 
             // -------------------- Stopping criterion ---------------------
 
@@ -350,6 +378,7 @@ public:
             write_rgb(ls.lpe_indirect_diff, aovs + IndirectDiffuse * 3, ls.valid_ray);
             write_rgb(ls.lpe_indirect_spec, aovs + IndirectSpecular* 3, ls.valid_ray);
             write_rgb(ls.lpe_emissive,      aovs + Emissive        * 3, ls.valid_ray);
+            write_rgb(ls.lpe_transmission,  aovs + Transmission    * 3, ls.valid_ray);
         }
 
         return {
