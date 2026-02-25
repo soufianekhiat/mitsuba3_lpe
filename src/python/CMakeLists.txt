@@ -233,7 +233,7 @@ set(STUB_ARGS
 # The sanitizers require preloading shared libraries into Python, and that
 # doesn't play well with stub generation. Disable stubs if sanitizers are
 # enabled.
-if (NOT (MI_SANITIZE_ADDRESS OR MI_SANITIZE_MEMORY))
+if (NOT (MI_SANITIZE_ADDRESS OR MI_SANITIZE_MEMORY OR MI_DISABLE_STUBS))
 
   set(MI_STUB_SUBMODULES "math" "quad" "spline" "mueller" "warp" "misc" "detail" "filesystem"
                          "python.ad" "python.chi2" "python.math_py" "python.util" "parser")

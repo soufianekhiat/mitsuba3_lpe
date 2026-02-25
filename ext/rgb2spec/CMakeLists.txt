@@ -18,7 +18,7 @@ set_target_properties(rgb2spec_opt PROPERTIES
   CXX_STANDARD_REQUIRED YES
   CXX_EXTENSIONS NO)
 
-if (NOT APPLE)
+if (NOT APPLE AND NOT EMBREE_TASKING_SYSTEM STREQUAL "INTERNAL")
   find_package(OpenMP)
   if(OpenMP_CXX_FOUND)
       target_link_libraries(rgb2spec_opt PRIVATE OpenMP::OpenMP_CXX)
