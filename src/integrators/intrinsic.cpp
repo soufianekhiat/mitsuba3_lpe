@@ -22,8 +22,9 @@
  *   - Or "roughness" attribute (principled BSDF)
  *   - Fallback: diffuse=1, delta=0, other=0.5
  *
- * Shadow: single-bounce emitter visibility (all emitters incl. environment),
- *   importance-sampled and averaged over spp.
+ * Shadow: single-bounce binary occlusion (deterministic, no spp averaging).
+ *   Uses fixed sample to pick the dominant emitter direction, tests visibility.
+ *   Result is pure black (0) or white (1), never grayscale.
  */
 
 #include <mitsuba/render/bsdf.h>
@@ -223,18 +224,21 @@ public:
             }
         }
 
-        // ===================== Shadow (single-bounce direct light visibility) =====================
-        // Tests occlusion toward a randomly sampled emitter (including
-        // environment maps). Over many spp this converges to the
-        // importance-weighted fraction of emitters visible from this surface.
+        // ===================== Shadow (single-bounce binary occlusion) =====================
+        // Deterministic: uses fixed sample (0.5, 0.5) so every spp produces
+        // the same result → pure binary (black/white, no grayscale).
+        // Tests visibility toward the importance-sampled emitter direction
+        // (including environment maps). 1 = lit, 0 = occluded.
         {
             Float vis = 0.f;
 
             if (dr::any_or<true>(valid)) {
+                // Fixed sample ensures identical result across all spp
+                Point2f fixed_sample(0.5f, 0.5f);
                 auto [ds, em_weight] = scene->sample_emitter_direction(
-                    si, sampler->next_2d(),
+                    si, fixed_sample,
                     /* test_visibility */ true, valid);
-                // pdf > 0 means the sampled emitter is visible (not occluded)
+                // pdf > 0 means the emitter is visible (not occluded)
                 dr::masked(vis, valid) =
                     dr::select(ds.pdf > 0.f, 1.f, 0.f);
             }
