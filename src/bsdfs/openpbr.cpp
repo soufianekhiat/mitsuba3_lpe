@@ -660,5 +660,5 @@ private:
                    m_specular_ior, m_coat_ior)
 };
 
-MI_EXPORT_PLUGIN(OpenPBRSurface, "OpenPBR Surface BSDF")
+MI_EXPORT_PLUGIN(OpenPBRSurface)
 NAMESPACE_END(mitsuba)
