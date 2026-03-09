@@ -20,6 +20,7 @@
 #include "usdGeom.hh"
 #include "composition.hh"
 #include "tydra/scene-access.hh"
+#include "io-util.hh"
 
 #include <unordered_map>
 #include <memory>
@@ -49,21 +50,77 @@ static std::shared_ptr<tinyusdz::Stage> load_composed_stage(
     resolver.set_current_working_path(base_dir);
     resolver.set_search_paths({base_dir});
 
-    // Iteratively resolve composition arcs until stable
+    // LIVRPS composition order:
+    // 1. SubLayers (Local) — process individually to avoid resolver CWP issues
     tinyusdz::Layer src_layer = root_layer;
+    if (!src_layer.metas().subLayers.empty()) {
+        // Process sublayers in reverse order: weakest (last) first,
+        // so base definitions (Mesh types) are established before
+        // stronger opinions (material bindings) overlay on top.
+        size_t n_sl = src_layer.metas().subLayers.size();
+        for (size_t ri = 0; ri < n_sl; ++ri) {
+            size_t idx = n_sl - 1 - ri;
+            const auto &sl = src_layer.metas().subLayers[idx];
+            std::string sl_path = sl.assetPath.GetAssetPath();
+            std::string sl_abs = base_dir + "/" + sl_path;
+            auto pos = sl_abs.find("/./");
+            while (pos != std::string::npos) {
+                sl_abs.erase(pos, 2);
+                pos = sl_abs.find("/./");
+            }
+
+            tinyusdz::Layer sub_layer;
+            std::string sl_warn, sl_err;
+            if (!tinyusdz::LoadLayerFromFile(sl_abs, &sub_layer, &sl_warn, &sl_err))
+                continue;
+
+            std::string sl_dir = tinyusdz::io::GetBaseDir(sl_abs);
+            if (!sub_layer.metas().subLayers.empty()) {
+                tinyusdz::AssetResolutionResolver sl_resolver;
+                sl_resolver.set_current_working_path(sl_dir);
+                sl_resolver.set_search_paths({sl_dir, base_dir});
+                tinyusdz::Layer sl_comp;
+                if (tinyusdz::CompositeSublayers(sl_resolver, sub_layer,
+                                                  &sl_comp, &sl_warn, &sl_err))
+                    sub_layer = std::move(sl_comp);
+            }
+
+            for (const auto &ps : sub_layer.primspecs()) {
+                if (src_layer.has_primspec(ps.first))
+                    tinyusdz::OverridePrimSpec(
+                        src_layer.primspecs().at(ps.first), ps.second,
+                        &sl_warn, &sl_err);
+                else
+                    src_layer.add_primspec(ps.first, ps.second);
+            }
+        }
+        src_layer.metas().subLayers.clear();
+    }
+
+    // 2. Iteratively resolve remaining arcs until stable
     constexpr int kMaxIter = 32;
     for (int iter = 0; iter < kMaxIter; ++iter) {
         bool has_unresolved = false;
 
-        if (src_layer.check_unresolved_references()) {
-            has_unresolved = true;
+        // Inherits (non-fatal for MaterialX-based scenes)
+        if (src_layer.check_unresolved_inherits()) {
             tinyusdz::Layer comp;
-            if (!tinyusdz::CompositeReferences(resolver, src_layer,
-                                                &comp, &warn, &err)) {
-                if (err_out) *err_out = "reference composition failed: " + err;
-                return nullptr;
+            if (tinyusdz::CompositeInherits(src_layer, &comp, &warn, &err)) {
+                has_unresolved = true;
+                src_layer = std::move(comp);
             }
-            src_layer = std::move(comp);
+            err.clear();
+        }
+
+        // References (non-fatal for MaterialX references)
+        if (src_layer.check_unresolved_references()) {
+            tinyusdz::Layer comp;
+            if (tinyusdz::CompositeReferences(resolver, src_layer,
+                                                &comp, &warn, &err)) {
+                has_unresolved = true;
+                src_layer = std::move(comp);
+            }
+            err.clear();
         }
 
         if (src_layer.check_unresolved_payload()) {
