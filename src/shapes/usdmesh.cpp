@@ -18,9 +18,88 @@
 // tinyusdz
 #include "tinyusdz.hh"
 #include "usdGeom.hh"
+#include "composition.hh"
 #include "tydra/scene-access.hh"
 
 #include <unordered_map>
+#include <memory>
+#include <mutex>
+
+// Static cache: avoid re-composing the same USD file for every mesh prim
+static std::mutex s_cache_mutex;
+static std::unordered_map<std::string, std::shared_ptr<tinyusdz::Stage>> s_stage_cache;
+
+static std::shared_ptr<tinyusdz::Stage> load_composed_stage(
+    const std::string &abs_path, const std::string &base_dir,
+    std::string *err_out)
+{
+    std::lock_guard<std::mutex> lock(s_cache_mutex);
+    auto it = s_stage_cache.find(abs_path);
+    if (it != s_stage_cache.end())
+        return it->second;
+
+    tinyusdz::Layer root_layer;
+    std::string warn, err;
+    if (!tinyusdz::LoadLayerFromFile(abs_path, &root_layer, &warn, &err)) {
+        if (err_out) *err_out = "load failed: " + err;
+        return nullptr;
+    }
+
+    tinyusdz::AssetResolutionResolver resolver;
+    resolver.set_current_working_path(base_dir);
+    resolver.set_search_paths({base_dir});
+
+    // Iteratively resolve composition arcs until stable
+    tinyusdz::Layer src_layer = root_layer;
+    constexpr int kMaxIter = 32;
+    for (int iter = 0; iter < kMaxIter; ++iter) {
+        bool has_unresolved = false;
+
+        if (src_layer.check_unresolved_references()) {
+            has_unresolved = true;
+            tinyusdz::Layer comp;
+            if (!tinyusdz::CompositeReferences(resolver, src_layer,
+                                                &comp, &warn, &err)) {
+                if (err_out) *err_out = "reference composition failed: " + err;
+                return nullptr;
+            }
+            src_layer = std::move(comp);
+        }
+
+        if (src_layer.check_unresolved_payload()) {
+            has_unresolved = true;
+            tinyusdz::Layer comp;
+            if (!tinyusdz::CompositePayload(resolver, src_layer,
+                                             &comp, &warn, &err)) {
+                if (err_out) *err_out = "payload composition failed: " + err;
+                return nullptr;
+            }
+            src_layer = std::move(comp);
+        }
+
+        if (src_layer.check_unresolved_variant()) {
+            has_unresolved = true;
+            tinyusdz::Layer comp;
+            if (!tinyusdz::CompositeVariant(src_layer, &comp, &warn, &err)) {
+                if (err_out) *err_out = "variant composition failed: " + err;
+                return nullptr;
+            }
+            src_layer = std::move(comp);
+        }
+
+        if (!has_unresolved) break;
+    }
+
+    auto stage = std::make_shared<tinyusdz::Stage>();
+    if (!tinyusdz::LayerToStage(src_layer, stage.get(), &warn, &err)) {
+        if (err_out) *err_out = "LayerToStage failed: " + err;
+        return nullptr;
+    }
+    stage->compute_absolute_prim_path_and_assign_prim_id();
+
+    s_stage_cache[abs_path] = stage;
+    return stage;
+}
 
 NAMESPACE_BEGIN(mitsuba)
 
@@ -65,11 +144,14 @@ public:
         ScopedPhase phase(ProfilerPhase::LoadGeometry);
         Timer timer;
 
-        // --- Load USD stage ---
-        tinyusdz::Stage stage;
-        std::string warn, err;
-        if (!tinyusdz::LoadUSDFromFile(file_path.string(), &stage, &warn, &err))
-            fail("tinyusdz load failed: %s", err.c_str());
+        // --- Load composed USD Stage (cached across instances) ---
+        std::string abs_path = fs::absolute(file_path).string();
+        std::string base_dir = fs::absolute(file_path).parent_path().string();
+        std::string load_err;
+        auto stage_ptr = load_composed_stage(abs_path, base_dir, &load_err);
+        if (!stage_ptr)
+            fail("%s", load_err.c_str());
+        const tinyusdz::Stage &stage = *stage_ptr;
 
         // --- Find mesh prim ---
         const tinyusdz::GeomMesh *mesh = nullptr;
