@@ -73,6 +73,35 @@ struct MtlxOpenPBRParams {
     std::array<float,3> transmission_color = {1.0f, 1.0f, 1.0f};
     bool has_transmission_color = false;
     std::string transmission_color_tex;
+    float transmission_depth = 0.0f;
+    bool has_transmission_depth = false;
+
+    // subsurface
+    float subsurface_weight = 0.0f;
+    bool has_subsurface = false;
+    std::string subsurface_weight_tex;
+    std::array<float,3> subsurface_color = {0.8f, 0.8f, 0.8f};
+    bool has_subsurface_color = false;
+    std::string subsurface_color_tex;
+    float subsurface_radius = 1.0f;
+    bool has_subsurface_radius = false;
+
+    // fuzz/sheen
+    float fuzz_weight = 0.0f;
+    bool has_fuzz = false;
+    std::string fuzz_weight_tex;
+    std::array<float,3> fuzz_color = {1.0f, 1.0f, 1.0f};
+    bool has_fuzz_color = false;
+    std::string fuzz_color_tex;
+    float fuzz_roughness = 0.5f;
+    bool has_fuzz_roughness = false;
+    std::string fuzz_roughness_tex;
+
+    // thin film
+    float thin_film_thickness = 0.0f;
+    bool has_thin_film = false;
+    float thin_film_ior = 1.5f;
+    bool has_thin_film_ior = false;
 
     // geometry
     bool thin_walled = false;
@@ -353,6 +382,66 @@ static MtlxOpenPBRParams parse_mtlx_openpbr(const std::string &mtlx_path,
             } else if (!value.empty() && type == "color3") {
                 params.transmission_color = parse_color3(value);
                 params.has_transmission_color = true;
+            }
+        } else if (name == "transmission_depth") {
+            if (!value.empty()) {
+                params.transmission_depth = parse_float(value, 0.0f);
+                params.has_transmission_depth = true;
+            }
+        } else if (name == "subsurface_weight") {
+            if (!tex_path.empty()) {
+                params.subsurface_weight_tex = tex_path;
+                params.has_subsurface = true;
+            } else if (!value.empty()) {
+                params.subsurface_weight = parse_float(value, 0.0f);
+                params.has_subsurface = true;
+            }
+        } else if (name == "subsurface_color") {
+            if (!tex_path.empty()) {
+                params.subsurface_color_tex = tex_path;
+                params.has_subsurface_color = true;
+            } else if (!value.empty() && type == "color3") {
+                params.subsurface_color = parse_color3(value);
+                params.has_subsurface_color = true;
+            }
+        } else if (name == "subsurface_radius") {
+            if (!value.empty()) {
+                params.subsurface_radius = parse_float(value, 1.0f);
+                params.has_subsurface_radius = true;
+            }
+        } else if (name == "fuzz_weight") {
+            if (!tex_path.empty()) {
+                params.fuzz_weight_tex = tex_path;
+                params.has_fuzz = true;
+            } else if (!value.empty()) {
+                params.fuzz_weight = parse_float(value, 0.0f);
+                params.has_fuzz = true;
+            }
+        } else if (name == "fuzz_color") {
+            if (!tex_path.empty()) {
+                params.fuzz_color_tex = tex_path;
+                params.has_fuzz_color = true;
+            } else if (!value.empty() && type == "color3") {
+                params.fuzz_color = parse_color3(value);
+                params.has_fuzz_color = true;
+            }
+        } else if (name == "fuzz_roughness") {
+            if (!tex_path.empty()) {
+                params.fuzz_roughness_tex = tex_path;
+                params.has_fuzz_roughness = true;
+            } else if (!value.empty()) {
+                params.fuzz_roughness = parse_float(value, 0.5f);
+                params.has_fuzz_roughness = true;
+            }
+        } else if (name == "thin_film_thickness") {
+            if (!value.empty()) {
+                params.thin_film_thickness = parse_float(value, 0.0f);
+                params.has_thin_film = true;
+            }
+        } else if (name == "thin_film_ior") {
+            if (!value.empty()) {
+                params.thin_film_ior = parse_float(value, 1.5f);
+                params.has_thin_film_ior = true;
             }
         } else if (name == "geometry_thin_walled") {
             if (!value.empty()) {
@@ -706,6 +795,70 @@ private:
                 bsdf_props.set("transmission_color", clamp01(mtlx->transmission_color));
             }
 
+            // transmission_depth
+            if (mtlx->has_transmission_depth)
+                bsdf_props.set("transmission_depth", mtlx->transmission_depth);
+
+            // subsurface_weight (texturable, raw)
+            if (!mtlx->subsurface_weight_tex.empty()) {
+                auto tex = create_bitmap_texture(mtlx->subsurface_weight_tex, true);
+                if (tex) bsdf_props.set("subsurface_weight", tex);
+                else if (mtlx->has_subsurface)
+                    bsdf_props.set("subsurface_weight", mtlx->subsurface_weight);
+            } else if (mtlx->has_subsurface) {
+                bsdf_props.set("subsurface_weight", mtlx->subsurface_weight);
+            }
+
+            // subsurface_color (texturable, sRGB)
+            if (!mtlx->subsurface_color_tex.empty()) {
+                auto tex = create_bitmap_texture(mtlx->subsurface_color_tex, false);
+                if (tex) bsdf_props.set("subsurface_color", tex);
+                else if (mtlx->has_subsurface_color)
+                    bsdf_props.set("subsurface_color", clamp01(mtlx->subsurface_color));
+            } else if (mtlx->has_subsurface_color) {
+                bsdf_props.set("subsurface_color", clamp01(mtlx->subsurface_color));
+            }
+
+            // subsurface_radius
+            if (mtlx->has_subsurface_radius)
+                bsdf_props.set("subsurface_radius", mtlx->subsurface_radius);
+
+            // fuzz_weight (texturable, raw)
+            if (!mtlx->fuzz_weight_tex.empty()) {
+                auto tex = create_bitmap_texture(mtlx->fuzz_weight_tex, true);
+                if (tex) bsdf_props.set("fuzz_weight", tex);
+                else if (mtlx->has_fuzz)
+                    bsdf_props.set("fuzz_weight", mtlx->fuzz_weight);
+            } else if (mtlx->has_fuzz) {
+                bsdf_props.set("fuzz_weight", mtlx->fuzz_weight);
+            }
+
+            // fuzz_color (texturable, sRGB)
+            if (!mtlx->fuzz_color_tex.empty()) {
+                auto tex = create_bitmap_texture(mtlx->fuzz_color_tex, false);
+                if (tex) bsdf_props.set("fuzz_color", tex);
+                else if (mtlx->has_fuzz_color)
+                    bsdf_props.set("fuzz_color", clamp01(mtlx->fuzz_color));
+            } else if (mtlx->has_fuzz_color) {
+                bsdf_props.set("fuzz_color", clamp01(mtlx->fuzz_color));
+            }
+
+            // fuzz_roughness (texturable, raw)
+            if (!mtlx->fuzz_roughness_tex.empty()) {
+                auto tex = create_bitmap_texture(mtlx->fuzz_roughness_tex, true);
+                if (tex) bsdf_props.set("fuzz_roughness", tex);
+                else if (mtlx->has_fuzz_roughness)
+                    bsdf_props.set("fuzz_roughness", mtlx->fuzz_roughness);
+            } else if (mtlx->has_fuzz_roughness) {
+                bsdf_props.set("fuzz_roughness", mtlx->fuzz_roughness);
+            }
+
+            // thin film
+            if (mtlx->has_thin_film)
+                bsdf_props.set("thin_film_thickness", mtlx->thin_film_thickness);
+            if (mtlx->has_thin_film_ior)
+                bsdf_props.set("thin_film_ior", mtlx->thin_film_ior);
+
             // geometry_thin_walled
             if (mtlx->has_thin_walled)
                 bsdf_props.set("geometry_thin_walled", mtlx->thin_walled);
@@ -967,7 +1120,7 @@ private:
             if (!li.texture_file.empty())
                 lights.push_back(li);
             else
-                Log(Warn, "USDScene: DomeLight '%s' has no resolved texture "
+                Log(Debug, "USDScene: DomeLight '%s' has no resolved texture "
                     "(define envmap in scene XML)", li.name.c_str());
         }
 
